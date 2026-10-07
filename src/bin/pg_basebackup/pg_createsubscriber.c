@@ -668,9 +668,9 @@ modify_subscriber_sysid(const struct CreateSubscriberOptions *opt)
 		int			rc = system(cmd_str);
 
 		if (rc == 0)
-			pg_log_info("subscriber successfully changed the system identifier");
+			pg_log_info("successfully reset WAL on the subscriber");
 		else
-			pg_fatal("could not change system identifier of subscriber: %s", wait_result_to_str(rc));
+			pg_fatal("could not reset WAL on subscriber: %s", wait_result_to_str(rc));
 	}
 
 	pg_free(cf);
@@ -1063,18 +1063,23 @@ drop_existing_subscriptions(PGconn *conn, const char *subname, const char *dbnam
 {
 	PQExpBuffer query = createPQExpBuffer();
 	PGresult   *res;
+	char	   *subname_esc;
 
 	Assert(conn != NULL);
+
+	subname_esc = PQescapeIdentifier(conn, subname, strlen(subname));
 
 	/*
 	 * Construct a query string. These commands are allowed to be executed
 	 * within a transaction.
 	 */
 	appendPQExpBuffer(query, "ALTER SUBSCRIPTION %s DISABLE;",
-					  subname);
+					  subname_esc);
 	appendPQExpBuffer(query, " ALTER SUBSCRIPTION %s SET (slot_name = NONE);",
-					  subname);
-	appendPQExpBuffer(query, " DROP SUBSCRIPTION %s;", subname);
+					  subname_esc);
+	appendPQExpBuffer(query, " DROP SUBSCRIPTION %s;", subname_esc);
+
+	PQfreemem(subname_esc);
 
 	pg_log_info("dropping subscription \"%s\" in database \"%s\"",
 				subname, dbname);
@@ -1206,8 +1211,17 @@ setup_recovery(const struct LogicalRepInfo *dbinfo, const char *datadir, const c
 	appendPQExpBuffer(recoveryconfcontents, "recovery_target = ''\n");
 	appendPQExpBuffer(recoveryconfcontents,
 					  "recovery_target_timeline = 'latest'\n");
+
+	/*
+	 * Set recovery_target_inclusive = false to avoid reapplying the
+	 * transaction committed at 'lsn' after subscription is enabled. This is
+	 * because the provided 'lsn' is also used as the replication start point
+	 * for the subscription. So, the server can send the transaction committed
+	 * at that 'lsn' after replication is started which can lead to applying
+	 * the same transaction twice if we keep recovery_target_inclusive = true.
+	 */
 	appendPQExpBuffer(recoveryconfcontents,
-					  "recovery_target_inclusive = true\n");
+					  "recovery_target_inclusive = false\n");
 	appendPQExpBuffer(recoveryconfcontents,
 					  "recovery_target_action = promote\n");
 	appendPQExpBuffer(recoveryconfcontents, "recovery_target_name = ''\n");
